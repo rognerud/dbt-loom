@@ -2,14 +2,15 @@ from dataclasses import dataclass
 import os
 import re
 from pathlib import Path
-from typing import Callable, Dict, Optional, Set
+from typing import Callable, Dict, Optional, Set, List
 
 import yaml
+from dbt.plugins.contracts import PluginArtifacts
 from dbt.contracts.graph.node_args import ModelNodeArgs
 from dbt.contracts.graph.nodes import ModelNode
 
 from dbt.plugins.manager import dbt_hook, dbtPlugin
-from dbt.plugins.manifest import PluginNodes
+from dbt.plugins.manifest import PluginNodes, Manifest
 from dbt.config.project import VarProvider
 
 from dbt_loom.shims import is_invalid_private_ref, is_invalid_protected_ref
@@ -54,7 +55,7 @@ class LoomModelNodeArgs(ModelNodeArgs):
         return unique_id
 
 
-def identify_node_subgraph(manifest) -> Dict[str, ManifestNode]:
+def identify_node_subgraph(manifest, node_type=ManifestNode) -> Dict[str, ManifestNode]:
     """
     Identify all nodes that should be selected from the manifest, and return ManifestNodes.
     """
@@ -79,10 +80,11 @@ def identify_node_subgraph(manifest) -> Dict[str, ManifestNode]:
             if node.get(key):
                 node[key] = str(node[key])
 
-        output[unique_id] = ManifestNode(**(node))
+        if node_type == ModelNode and node.get("root_path"):
+            node.pop("root_path") # unsure why this is necessary, but it is
 
+        output[unique_id] = node_type(**(node))
     return output
-
 
 def convert_model_nodes_to_model_node_args(
     selected_nodes: Dict[str, ManifestNode],
@@ -128,6 +130,7 @@ class dbtLoom(dbtPlugin):
 
         self.config: Optional[dbtLoomConfig] = self.read_config(configuration_path)
         self.models: Dict[str, LoomModelNodeArgs] = {}
+        self.manifest_models: Dict[str, ModelNode] = {}
 
         self._patch_ref_protection()
 
@@ -289,8 +292,20 @@ class dbtLoom(dbtPlugin):
             }
 
             loom_nodes = convert_model_nodes_to_model_node_args(filtered_nodes)
-
+            
             self.models.update(loom_nodes)
+
+            metadata_nodes = identify_node_subgraph(manifest, node_type=ModelNode)
+            # Remove nodes from excluded packages.
+
+            filtered_fancy_nodes = {
+                key: value
+                for key, value in metadata_nodes.items()
+                if value.package_name not in manifest_reference.excluded_packages
+            }
+
+            self.manifest_models.update(filtered_fancy_nodes)
+
 
     @dbt_hook
     def get_nodes(self) -> PluginNodes:
@@ -300,5 +315,19 @@ class dbtLoom(dbtPlugin):
         fire_event(msg="dbt-loom: Injecting nodes")
         return PluginNodes(models=self.models)  # type: ignore
 
+    @dbt_hook
+    def get_manifest_artifacts(self, manifest: Manifest) -> PluginArtifacts:
+        """
+        Inject metadata into the manifest.
+        Overwrite the manifest by rewriting it with the injected models from within dbt
+        """
+        for key, value in self.manifest_models.items():
+            if key in manifest.nodes:
+                if manifest.nodes.get(key).description == "":
+                    manifest.nodes[key].description = value.description
+                if manifest.nodes.get(key).tags == []:
+                    manifest.nodes[key].tags = value.tags
+
+        return {"target/manifest.json": manifest}
 
 plugins = [dbtLoom]
