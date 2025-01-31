@@ -295,16 +295,13 @@ class dbtLoom(dbtPlugin):
             
             self.models.update(loom_nodes)
 
-            metadata_nodes = identify_node_subgraph(manifest, node_type=ModelNode)
-            # Remove nodes from excluded packages.
-
-            filtered_fancy_nodes = {
+            # get complete metadata nodes for updating manifest metadata
+            metadata_nodes = {
                 key: value
-                for key, value in metadata_nodes.items()
+                for key, value in identify_node_subgraph(manifest, node_type=ModelNode).items()
                 if value.package_name not in manifest_reference.excluded_packages
             }
-
-            self.manifest_models.update(filtered_fancy_nodes)
+            self.manifest_models.update(metadata_nodes)
 
 
     @dbt_hook
