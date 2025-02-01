@@ -2,14 +2,15 @@ from dataclasses import dataclass
 import os
 import re
 from pathlib import Path
-from typing import Callable, Dict, Optional, Set
+from typing import Callable, Dict, Optional, Set, List
 
 import yaml
+from dbt.plugins.contracts import PluginArtifacts
 from dbt.contracts.graph.node_args import ModelNodeArgs
-from dbt.contracts.graph.nodes import ModelNode
+from dbt.contracts.graph.nodes import ModelNode, ColumnInfo
 
 from dbt.plugins.manager import dbt_hook, dbtPlugin
-from dbt.plugins.manifest import PluginNodes
+from dbt.plugins.manifest import PluginNodes, Manifest
 from dbt.config.project import VarProvider
 
 from dbt_loom.shims import is_invalid_private_ref, is_invalid_protected_ref
@@ -54,7 +55,7 @@ class LoomModelNodeArgs(ModelNodeArgs):
         return unique_id
 
 
-def identify_node_subgraph(manifest) -> Dict[str, ManifestNode]:
+def identify_node_subgraph(manifest, node_type=ManifestNode) -> Dict[str, ManifestNode]:
     """
     Identify all nodes that should be selected from the manifest, and return ManifestNodes.
     """
@@ -79,10 +80,11 @@ def identify_node_subgraph(manifest) -> Dict[str, ManifestNode]:
             if node.get(key):
                 node[key] = str(node[key])
 
-        output[unique_id] = ManifestNode(**(node))
+        if node_type == ModelNode and node.get("root_path"):
+            node.pop("root_path") # unsure why this is necessary, but it is
 
+        output[unique_id] = node_type(**(node))
     return output
-
 
 def convert_model_nodes_to_model_node_args(
     selected_nodes: Dict[str, ManifestNode],
@@ -116,7 +118,7 @@ class dbtLoom(dbtPlugin):
     def __init__(self, project_name: str):
         # Log the version of dbt-loom being initialized
         fire_event(
-            msg=f'Initializing dbt-loom={importlib.metadata.version("dbt-loom")}'
+            msg=f'Initializing dbt-loom (🧵)={importlib.metadata.version("dbt-loom")}'
         )
 
         configuration_path = Path(
@@ -128,6 +130,7 @@ class dbtLoom(dbtPlugin):
 
         self.config: Optional[dbtLoomConfig] = self.read_config(configuration_path)
         self.models: Dict[str, LoomModelNodeArgs] = {}
+        self.manifest_models: Dict[str, ModelNode] = {}
 
         self._patch_ref_protection()
 
@@ -141,7 +144,7 @@ class dbtLoom(dbtPlugin):
         import dbt.contracts.graph.manifest
 
         fire_event(
-            msg="dbt-loom: Patching ref protection methods to support dbt-loom dependencies."
+            msg="🧵: Patching ref protection methods to support dbt-loom dependencies."
         )
 
         dbt.contracts.graph.manifest.Manifest.is_invalid_protected_ref = (  # type: ignore
@@ -265,7 +268,7 @@ class dbtLoom(dbtPlugin):
 
         for manifest_reference in self.config.manifests:
             fire_event(
-                msg=f"dbt-loom: Loading manifest for `{manifest_reference.name}`"
+                msg=f"🧵: Loading manifest for `{manifest_reference.name}`"
                 f" from `{manifest_reference.type.value}`"
             )
 
@@ -289,16 +292,68 @@ class dbtLoom(dbtPlugin):
             }
 
             loom_nodes = convert_model_nodes_to_model_node_args(filtered_nodes)
-
+            
             self.models.update(loom_nodes)
+
+            # get complete metadata nodes for updating manifest metadata
+            metadata_nodes = {
+                key: value
+                for key, value in identify_node_subgraph(manifest, node_type=ModelNode).items()
+                if value.package_name not in manifest_reference.excluded_packages
+            }
+            self.manifest_models.update(metadata_nodes)
+
 
     @dbt_hook
     def get_nodes(self) -> PluginNodes:
         """
         Inject PluginNodes to dbt for injection into dbt's DAG.
         """
-        fire_event(msg="dbt-loom: Injecting nodes")
+        fire_event(msg="🧵: Injecting nodes")
         return PluginNodes(models=self.models)  # type: ignore
 
+    @dbt_hook
+    def get_manifest_artifacts(self, manifest: Manifest) -> PluginArtifacts:
+        """
+        Inject metadata into the manifest.
+        Overwrite the manifest by rewriting it with the injected models from within dbt
+        """
+        for key, value in self.manifest_models.items():
+            if key in manifest.nodes:
+                node = manifest.nodes[key]
+
+                # Update description if it is empty and value has a description
+                if node.description == "":
+                    if value.description:
+                        node.description = value.description
+                
+                # Update tags if it is empty and value has tags
+                if node.tags == []:
+                    if value.tags:
+                        node.tags = value.tags
+                
+                # Update meta if it is empty and value has meta
+                if node.meta == {}:
+                    if value.meta:
+                        node.meta = value.meta
+                
+                # Update columns if it is empty and value has columns
+                if node.columns == {} and value.columns:
+                    for column_key, column_value in value.columns.items():
+
+                        # Ensure column_value is a dictionary and has the required keys before unpacking
+                        if isinstance(column_value, dict) and \
+                        'name' in column_value and \
+                        'description' in column_value and \
+                        'meta' in column_value:
+
+                            node.columns[column_key] = ColumnInfo(
+                                name=column_value.get("name"), 
+                                description=column_value.get("description"), 
+                                meta=column_value.get("meta")
+                            )
+                            
+        fire_event(msg="🧵: Injecting metadata")
+        return {"target/manifest.json": manifest}
 
 plugins = [dbtLoom]

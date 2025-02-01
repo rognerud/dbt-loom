@@ -2,7 +2,7 @@
 venv/
 venv-*/
 dist/
-
+.local_dbt/
 __pycache__/
 .mypy_cache/
 .pytest_cache/
