@@ -80,10 +80,18 @@ def identify_node_subgraph(manifest, node_type=ManifestNode) -> Dict[str, Manife
             if node.get(key):
                 node[key] = str(node[key])
 
-        if node_type == ModelNode and node.get("root_path"):
-            node.pop("root_path") # unsure why this is necessary, but it is
-
-        output[unique_id] = node_type(**(node))
+        if node_type == ModelNode:
+            if node.get("resource_type") == NodeType.Model.value:
+                if node.get("root_path"):
+                    node.pop("root_path") # unsure why this is necessary, but it is
+                if node.get("index"):
+                    node.pop("index")
+                try:
+                    output[unique_id] = ModelNode(**node)
+                except Exception as e:
+                    fire_event(msg=f"🧵: Error loading ModelNode: {node}:{e}")
+        else:
+            output[unique_id] = node_type(**(node))
     return output
 
 def convert_model_nodes_to_model_node_args(
@@ -143,9 +151,9 @@ class dbtLoom(dbtPlugin):
         """Patch out the ref protection functions for proper protections"""
         import dbt.contracts.graph.manifest
 
-        fire_event(
-            msg="🧵: Patching ref protection methods to support dbt-loom dependencies."
-        )
+        # fire_event(
+        #     msg="🧵: Patching ref protection methods to support dbt-loom dependencies."
+        # )
 
         dbt.contracts.graph.manifest.Manifest.is_invalid_protected_ref = (  # type: ignore
             self.dependency_wrapper(is_invalid_protected_ref)
@@ -295,13 +303,16 @@ class dbtLoom(dbtPlugin):
             
             self.models.update(loom_nodes)
 
-            # get complete metadata nodes for updating manifest metadata
-            metadata_nodes = {
-                key: value
-                for key, value in identify_node_subgraph(manifest, node_type=ModelNode).items()
-                if value.package_name not in manifest_reference.excluded_packages
-            }
-            self.manifest_models.update(metadata_nodes)
+            try:
+                    # get complete metadata nodes for updating manifest metadata
+                    metadata_nodes = {
+                        key: value
+                        for key, value in identify_node_subgraph(manifest, node_type=ModelNode).items()
+                        if value.package_name not in manifest_reference.excluded_packages
+                    }
+                    self.manifest_models.update(metadata_nodes)
+            except Exception as e:
+                fire_event(msg=f"🧵: Error loading metadata nodes: {e}")
 
 
     @dbt_hook
@@ -354,6 +365,6 @@ class dbtLoom(dbtPlugin):
                             )
                             
         fire_event(msg="🧵: Injecting metadata")
-        return {"target/manifest.json": manifest}
+        return {"target/manifest2.json": manifest}
 
 plugins = [dbtLoom]
