@@ -7,7 +7,7 @@ from typing import Callable, Dict, Optional, Set, List
 import yaml
 from dbt.plugins.contracts import PluginArtifacts
 from dbt.contracts.graph.node_args import ModelNodeArgs
-from dbt.contracts.graph.nodes import ModelNode
+from dbt.contracts.graph.nodes import ModelNode, ColumnInfo
 
 from dbt.plugins.manager import dbt_hook, dbtPlugin
 from dbt.plugins.manifest import PluginNodes, Manifest
@@ -118,7 +118,7 @@ class dbtLoom(dbtPlugin):
     def __init__(self, project_name: str):
         # Log the version of dbt-loom being initialized
         fire_event(
-            msg=f'Initializing dbt-loom={importlib.metadata.version("dbt-loom")}'
+            msg=f'Initializing dbt-loom (🧵)={importlib.metadata.version("dbt-loom")}'
         )
 
         configuration_path = Path(
@@ -144,7 +144,7 @@ class dbtLoom(dbtPlugin):
         import dbt.contracts.graph.manifest
 
         fire_event(
-            msg="dbt-loom: Patching ref protection methods to support dbt-loom dependencies."
+            msg="🧵: Patching ref protection methods to support dbt-loom dependencies."
         )
 
         dbt.contracts.graph.manifest.Manifest.is_invalid_protected_ref = (  # type: ignore
@@ -268,7 +268,7 @@ class dbtLoom(dbtPlugin):
 
         for manifest_reference in self.config.manifests:
             fire_event(
-                msg=f"dbt-loom: Loading manifest for `{manifest_reference.name}`"
+                msg=f"🧵: Loading manifest for `{manifest_reference.name}`"
                 f" from `{manifest_reference.type.value}`"
             )
 
@@ -309,7 +309,7 @@ class dbtLoom(dbtPlugin):
         """
         Inject PluginNodes to dbt for injection into dbt's DAG.
         """
-        fire_event(msg="dbt-loom: Injecting nodes")
+        fire_event(msg="🧵: Injecting nodes")
         return PluginNodes(models=self.models)  # type: ignore
 
     @dbt_hook
@@ -320,11 +320,40 @@ class dbtLoom(dbtPlugin):
         """
         for key, value in self.manifest_models.items():
             if key in manifest.nodes:
-                if manifest.nodes.get(key).description == "":
-                    manifest.nodes[key].description = value.description
-                if manifest.nodes.get(key).tags == []:
-                    manifest.nodes[key].tags = value.tags
+                node = manifest.nodes[key]
 
+                # Update description if it is empty and value has a description
+                if node.description == "":
+                    if value.description:
+                        node.description = value.description
+                
+                # Update tags if it is empty and value has tags
+                if node.tags == []:
+                    if value.tags:
+                        node.tags = value.tags
+                
+                # Update meta if it is empty and value has meta
+                if node.meta == {}:
+                    if value.meta:
+                        node.meta = value.meta
+                
+                # Update columns if it is empty and value has columns
+                if node.columns == {} and value.columns:
+                    for column_key, column_value in value.columns.items():
+
+                        # Ensure column_value is a dictionary and has the required keys before unpacking
+                        if isinstance(column_value, dict) and \
+                        'name' in column_value and \
+                        'description' in column_value and \
+                        'meta' in column_value:
+
+                            node.columns[column_key] = ColumnInfo(
+                                name=column_value.get("name"), 
+                                description=column_value.get("description"), 
+                                meta=column_value.get("meta")
+                            )
+                            
+        fire_event(msg="🧵: Injecting metadata")
         return {"target/manifest.json": manifest}
 
 plugins = [dbtLoom]
